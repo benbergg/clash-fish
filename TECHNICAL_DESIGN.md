@@ -77,6 +77,7 @@
 - 支持多配置文件管理（profile 切换）
 - 自动导入订阅链接（支持 Clash/V2Ray 订阅）
 - 配置模板生成
+- 使用 Viper 统一加载：默认值 → YAML → 环境变量 → CLI flags，缺失必填项时即时报错并给出修复建议
 
 #### 实现方案
 ```go
@@ -99,7 +100,15 @@ type Profile struct {
 - UpdateSubscription(url string) error
 - SwitchProfile(name string) error
 - GenerateTemplate() error
+- LoadAndBind(cfg *Config, flags *pflag.FlagSet) (*Config, error) // Viper 驱动的配置加载入口
 ```
+
+#### 配置加载流程（Viper）
+1. 设置默认值（端口、日志目录、configDir 等）。
+2. 读取 `config.yaml`（路径来自 flag/env，默认 `~/.config/clash-fish/config.yaml`）。
+3. 绑定环境变量（前缀 `CLASH_FISH_`）。
+4. 绑定 CLI flag（以 flag 覆盖 env/YAML）。
+5. 调用 ValidateConfig，缺失或非法字段时返回可读错误（注明字段名与期望格式）。
 
 ### 3.2 代理管理模块
 
@@ -108,6 +117,7 @@ type Profile struct {
 - 代理状态监控
 - 流量统计
 - 连接管理
+- 支持双模式：库模式（默认）与外部二进制模式（兼容性/体积回退）
 
 #### 实现方案
 ```go
@@ -115,6 +125,7 @@ type ProxyManager struct {
     core      *mihomo.Engine
     status    ProxyStatus
     statsCollector *StatsCollector
+    backend   ProxyBackend // interface，支持 library/process 两种实现
 }
 
 // 核心方法
@@ -124,6 +135,11 @@ type ProxyManager struct {
 - GetStatus() ProxyStatus
 - GetTraffic() TrafficStats
 ```
+
+**库模式 vs 进程模式 决策**
+- 优先库模式；若出现构建体积、目标平台兼容或启动崩溃问题，则切换到进程模式。
+- `ProxyBackend` 接口：`Start(configPath string) error`, `Stop() error`, `IsRunning() bool`.
+- 进程模式：封装 `mihomo -d <configDir> -f <configFile>`，管理 PID 与退出码；日志重定向到 `~/.config/clash-fish/logs/mihomo.log`。
 
 ### 3.3 系统集成模块
 
@@ -288,7 +304,20 @@ func Start() error {
     // mihomo 的 auto-route 会自动处理路由配置
     startMihomo()
 }
+
+// 启动防护与回滚（伪代码）
+func StartWithGuard() error {
+    // 1) 检查 utun 设备可用性，预创建日志/配置/ PID 路径
+    // 2) 若 VPN 或 TUN 创建失败，记录错误并退出，不留下 PID/路由残留
+    // 3) 应用路由后再次校验默认路由与分流是否符合预期
+    // 4) 任一步失败都调用 CleanupRoutes() 和 RemovePID()
+}
 ```
+
+**失败回滚策略**
+- 申请 TUN/utun 失败：不写 PID，直接返回错误。
+- 路由配置失败：撤销已添加路由，保持原系统路由。
+- 进程启动失败：清理 PID、关闭日志文件句柄。
 
 ### 4.5 兼容性
 
@@ -317,10 +346,8 @@ vpn-rules:
 ## 5. 自动导入代理配置
 
 ### 5.1 支持的订阅格式
-- Clash 订阅（YAML）
-- V2Ray 订阅（base64 编码）
-- Shadowsocks 订阅（SIP002）
-- Trojan 订阅
+- MVP 范围：Clash 订阅（YAML）——仅当解析为有效 Clash/Mihomo 配置时接受。
+- 非 MVP（暂不支持，需明确拒绝并提示格式不支持）：V2Ray（base64）、Shadowsocks（SIP002）、Trojan。
 
 ### 5.2 实现流程
 ```go
@@ -328,10 +355,14 @@ func ImportSubscription(url string) error {
     // 1. 下载订阅内容
     content := httpClient.Get(url)
 
-    // 2. 检测格式
-    format := DetectFormat(content)
+    // 2. 检测格式（仅接受 Clash YAML，其他格式返回 ErrUnsupportedFormat）
+    format := DetectFormat(content) // 返回 clash|unsupported
 
-    // 3. 转换为 mihomo 格式
+    if format != "clash" {
+        return ErrUnsupportedFormat
+    }
+
+    // 3. 转换/验证为 mihomo 兼容配置
     config := ConvertToMihomo(content, format)
 
     // 4. 验证配置
@@ -362,6 +393,10 @@ func (u *SubscriptionUpdater) Start() {
     }()
 }
 ```
+
+**验证与错误处理**
+- 导入时校验必需字段（端口、代理组、规则、TUN/DNS 配置），缺失字段给出字段名和示例。
+- 不访问外部网络的测试中，Downloader 需可注入假客户端以避免真实 HTTP。
 
 ---
 
@@ -738,11 +773,16 @@ func AdjustRoutingPolicy(vpnActive bool) {
 - 以最小权限运行（仅必要操作提权）
 - 进程 PID 文件防止重复启动
 - 优雅关闭处理（信号捕获）
+- start/stop/restart 必须显式 root 检查；禁止静默提权，失败时返回可读错误
 
 ### 11.3 网络安全
 - DNS 泄漏防护
 - WebRTC IP 泄漏防护
 - 流量加密验证
+
+### 11.4 路径与权限准则
+- 默认配置/日志目录：`~/.config/clash-fish/`（含 `logs/`, `profiles/`）；写入前确保目录存在且权限正确。
+- 日志文件在启动失败时也要关闭文件句柄并避免遗留空 PID。
 
 ---
 
