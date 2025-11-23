@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 
+	"github.com/clash-fish/clash-fish/internal/proxy"
 	"github.com/clash-fish/clash-fish/pkg/logger"
 	"github.com/clash-fish/clash-fish/pkg/utils"
 	"github.com/spf13/cobra"
@@ -23,11 +24,13 @@ func runStop(cmd *cobra.Command, args []string) error {
 
 	logger.Info().Msg("Stopping clash-fish service...")
 
-	// TODO: 实现停止逻辑
-	// 1. 检查服务是否在运行
-	// 2. 停止 mihomo 引擎
-	// 3. 清理系统设置
-	// 4. 删除 PID 文件
+	// 创建代理管理器
+	manager := proxy.NewManager(configDir)
+
+	// 停止服务
+	if err := manager.Stop(); err != nil {
+		return fmt.Errorf("failed to stop service: %w", err)
+	}
 
 	fmt.Println("✓ Clash-Fish stopped successfully")
 	logger.Info().Msg("Service stopped")

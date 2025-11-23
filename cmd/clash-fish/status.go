@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 
+	"github.com/clash-fish/clash-fish/internal/config"
+	"github.com/clash-fish/clash-fish/internal/proxy"
+	"github.com/clash-fish/clash-fish/internal/system"
 	"github.com/spf13/cobra"
 )
 
@@ -16,17 +19,46 @@ var statusCmd = &cobra.Command{
 func runStatus(cmd *cobra.Command, args []string) error {
 	fmt.Println("=== Clash-Fish Status ===")
 
-	// TODO: 实现状态查看逻辑
-	// 1. 检查服务是否在运行
-	// 2. 显示 VPN 连接状态
-	// 3. 显示配置信息（模式、端口等）
-	// 4. 显示流量统计（可选）
+	// 创建代理管理器
+	manager := proxy.NewManager(configDir)
 
-	fmt.Println("Service:    ✗ Not Running")
-	fmt.Println("VPN:        - Not Detected")
-	fmt.Println("Mode:       - N/A")
-	fmt.Println("HTTP Port:  - N/A")
-	fmt.Println("SOCKS Port: - N/A")
+	// 检查服务状态
+	if manager.IsRunning() {
+		pid, _ := manager.GetPID()
+		fmt.Printf("Service:    ✓ Running (PID: %d)\n", pid)
+	} else {
+		fmt.Println("Service:    ✗ Not Running")
+	}
+
+	// VPN 检测
+	vpnInfo, err := system.DetectVPN()
+	if err != nil {
+		fmt.Printf("VPN:        ✗ Detection Failed: %v\n", err)
+	} else if vpnInfo.Active {
+		fmt.Printf("VPN:        ✓ Active (%s: %s)\n", vpnInfo.Interface, vpnInfo.IP)
+	} else {
+		fmt.Println("VPN:        - Not Detected")
+	}
+
+	// 配置信息
+	cfgMgr := config.NewManager(configDir)
+	if cfgMgr.Exists() {
+		cfg, err := cfgMgr.Load()
+		if err != nil {
+			fmt.Printf("Config:     ✗ Load Failed: %v\n", err)
+		} else {
+			fmt.Printf("Mode:       %s\n", cfg.Mode)
+			fmt.Printf("HTTP Port:  %d\n", cfg.Port)
+			fmt.Printf("SOCKS Port: %d\n", cfg.SocksPort)
+			fmt.Printf("TUN Mode:   %v\n", cfg.TUN.Enable)
+			if cfg.TUN.Enable {
+				fmt.Printf("  Stack:    %s\n", cfg.TUN.Stack)
+			}
+		}
+	} else {
+		fmt.Println("Config:     ✗ Not Initialized")
+		fmt.Println("            Run 'clash-fish config init' to create configuration")
+	}
 
 	return nil
 }
